@@ -6,6 +6,10 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from routers import delivery_router
+from sql import models
+from sql import database
+from broker import delivery_broker_service, setup_rabbitmq
+import asyncio
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
 logger = logging.getLogger(__name__)
@@ -25,10 +29,25 @@ async def lifespan(__app: FastAPI):
             logger.error(
                 "Could not create tables at startup",
             )
+        try:
+            await setup_rabbitmq.setup_rabbitmq()
+        except Exception as e:
+            logger.error(f"Error configurando RabbitMQ: {e}")
+
+        try:
+            task = asyncio.create_task(delivery_broker_service.consume_order_events())
+            #task_auth = asyncio.create_task(order_broker_service.consume_auth_events())
+        except Exception as e:
+            logger.error(f"Error lanzando payment broker service: {e}")
+
+
         yield
     finally:
         logger.info("Shutting down database")
         await database.engine.dispose()
+        logger.info("Shutting down rabbitmq")
+        task.cancel()
+        #task_auth.cancel()
 
 
 # OpenAPI Documentation ############################################################################
@@ -64,7 +83,7 @@ app = FastAPI(
         "url": "https://choosealicense.com/licenses/mit/",
     },
     openapi_tags=tag_metadata,
-    #lifespan=lifespan,
+    lifespan=lifespan,
 )
 
 app.include_router(delivery_router.router)

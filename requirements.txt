@@ -9,3 +9,5 @@ coloredlogs~=15.0
 PyYAML~=6.0
 requests~=2.32.4
 httpx
+aio-pika
+pika
