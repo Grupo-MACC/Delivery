@@ -27,3 +27,16 @@ class Payment(PaymentBase):
         default="Created",
         example="Finished"
     )
+
+DeliveryStatusType = Literal["Delivering", "Delivered", "Not Delivered"]
+
+class DeliveryStatusBase(BaseModel):
+    order_id: int = Field(description="Id del pedido", example=1)
+    status: DeliveryStatusType = Field(description="Estado actual de la entrega", example="Delivered")
+
+class DeliveryStatusCreate(DeliveryStatusBase):
+    """Schema definition to create/update delivery status"""
+
+class DeliveryStatus(DeliveryStatusBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int = Field(description="Primary key/identifier of the delivery status", example=1)

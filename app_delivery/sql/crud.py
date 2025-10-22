@@ -44,6 +44,28 @@ async def get_payment(db: AsyncSession, payment_id):
     order = await get_element_statement_result(db, stmt)
     return order
 
+async def create_or_update_delivery_status(db: AsyncSession, order_id: int, status: str):
+    """Crea o actualiza el estado de entrega de un pedido."""
+    stmt = select(models.DeliveryStatus).where(models.DeliveryStatus.order_id == order_id)
+    result = await db.execute(stmt)
+    delivery_status = result.scalars().first()
+
+    if delivery_status:
+        delivery_status.status = status
+    else:
+        delivery_status = models.DeliveryStatus(order_id=order_id, status=status)
+        db.add(delivery_status)
+
+    await db.commit()
+    await db.refresh(delivery_status)
+    return delivery_status
+
+
+async def get_delivery_status(db: AsyncSession, order_id: int):
+    """Obtiene el estado de entrega de un pedido."""
+    stmt = select(models.DeliveryStatus).where(models.DeliveryStatus.order_id == order_id)
+    result = await db.execute(stmt)
+    return result.scalars().first()
 
 # Generic functions ################################################################################
 # READ

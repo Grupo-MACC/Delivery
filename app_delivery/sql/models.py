@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Database models definitions. Table representations as class."""
-from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy import Column, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.sql import func
 from .database import Base  # igual que en Order: Base viene de database.py
 
@@ -48,3 +48,12 @@ class Payment(BaseModel):
     currency = Column(String(3), nullable=False, default="EUR")
 
     status = Column(String(32), nullable=False, default=STATUS_INITIATED)
+
+class DeliveryStatus(BaseModel):
+    """Tabla para guardar el estado de entrega de los pedidos"""
+    __tablename__ = "delivery_status"
+    __table_args__ = (UniqueConstraint("order_id", name="uq_delivery_order_id"),)
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, nullable=False)
+    status = Column(String(32), nullable=False, default="Pending")
