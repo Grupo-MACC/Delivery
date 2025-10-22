@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import httpx
+from dependencies import get_db
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from .router_utils import raise_and_log_error, ORDER_SERVICE_URL
@@ -36,8 +37,16 @@ async def create_or_update_delivery_status(order_id: int, status: str, db: Async
     return delivery_status
 
 
-@router.get("/delivery_status/{order_id}", response_model=schemas.DeliveryStatus)
-async def get_delivery_status(order_id: int, db: AsyncSession = Depends(database.SessionLocal)):
+@router.get(
+    "/delivery_status/{order_id}",
+    response_model=schemas.DeliveryStatus,
+    summary="Get delivery status by order_id",
+    tags=["Delivery"]
+)
+async def get_delivery_status(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),  # ✅ usa get_db aquí
+):
     """Obtiene el estado actual de entrega."""
     delivery_status = await crud.get_delivery_status(db, order_id)
     if not delivery_status:
