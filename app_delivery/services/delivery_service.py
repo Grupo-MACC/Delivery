@@ -24,4 +24,4 @@ async def update_delivery_status(order_id: int, status: str):
             order_id=order_id,
             status=status
         )
-    return db_delivery
+        return db_delivery

@@ -26,7 +26,7 @@ async def handle_order_ready(message):
         data = json.loads(message.body)
         order_id = data["order_id"]
         status="Delivering"
-        await delivery_service.update_delivery_status(order_id, status)
+        db_delivery= await delivery_service.update_delivery_status(order_id, status)
         await publish_order_delivered(order_id=order_id,status=status)   # ✅ Con await
 
         status = await delivery_service.deliver(order_id=order_id)  # ✅ Con await
