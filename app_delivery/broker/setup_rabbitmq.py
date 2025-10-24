@@ -1,6 +1,6 @@
 from aio_pika import connect_robust, ExchangeType
 
-RABBITMQ_HOST = "amqp://guest:guest@localhost/"
+RABBITMQ_HOST = "amqp://guest:guest@rabbitmq/"
 EXCHANGE_NAME = "order_payment_exchange"
 
 async def setup_rabbitmq():
