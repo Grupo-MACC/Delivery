@@ -1,8 +1,7 @@
-from sql import crud, models, schemas
-from sqlalchemy.ext.asyncio import AsyncSession
+from sql import crud
 import asyncio
 import logging
-from dependencies import get_db
+from microservice_chassis_grupo2.core.dependencies import get_db
 
 
 logger = logging.getLogger(__name__)

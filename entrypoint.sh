@@ -16,7 +16,11 @@ trap terminate SIGTERM SIGINT
 
 uvicorn app_delivery.main:app \
   --host 0.0.0.0 \
-  --port 5002 &
+  --port 5002 \
+  --ssl-keyfile /certs/delivery/delivery-key.pem \
+  --ssl-certfile /certs/delivery/delivery-cert.pem \
+  --ssl-ca-certs /certs/ca.pem \
+  --ssl-cert-reqs 2 &
 
 UVICORN_PID=$!
 

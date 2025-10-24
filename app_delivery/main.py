@@ -6,8 +6,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from routers import delivery_router
-from sql import models
-from sql import database
+from microservice_chassis_grupo2.sql import database, models
 from broker import delivery_broker_service, setup_rabbitmq
 import asyncio
 # Configure logging ################################################################################
@@ -29,14 +28,15 @@ async def lifespan(__app: FastAPI):
             logger.error(
                 "Could not create tables at startup",
             )
-        try:
+            
+        '''try:
             await setup_rabbitmq.setup_rabbitmq()
         except Exception as e:
-            logger.error(f"Error configurando RabbitMQ: {e}")
+            logger.error(f"Error configurando RabbitMQ: {e}")'''
 
         try:
-            task = asyncio.create_task(delivery_broker_service.consume_order_events())
-            #task_auth = asyncio.create_task(order_broker_service.consume_auth_events())
+            task_order = asyncio.create_task(delivery_broker_service.consume_order_events())
+            task_auth = asyncio.create_task(delivery_broker_service.consume_auth_events())
         except Exception as e:
             logger.error(f"Error lanzando payment broker service: {e}")
 
@@ -46,43 +46,22 @@ async def lifespan(__app: FastAPI):
         logger.info("Shutting down database")
         await database.engine.dispose()
         logger.info("Shutting down rabbitmq")
-        task.cancel()
-        #task_auth.cancel()
+        task_order.cancel()
+        task_auth.cancel()
 
 
 # OpenAPI Documentation ############################################################################
 APP_VERSION = os.getenv("APP_VERSION", "2.0.0")
 logger.info("Running app version %s", APP_VERSION)
-DESCRIPTION = """
-Monolithic manufacturing order application.
-"""
-
-tag_metadata = [
-    {
-        "name": "Delivery",
-        "description": "Endpoints related to deliverys",
-    },
-    {
-        "name": "Order",
-        "description": "Endpoints to **CREATE**, **READ**, **UPDATE** or **DELETE** orders.",
-    },
-    {
-        "name": "Piece",
-        "description": "Endpoints **READ** piece information.",
-    },
-]
 
 app = FastAPI(
     redoc_url=None,  # disable redoc documentation.
-    title="FastAPI - Monolithic app",
-    description=DESCRIPTION,
     version=APP_VERSION,
     servers=[{"url": "/", "description": "Development"}],
     license_info={
         "name": "MIT License",
         "url": "https://choosealicense.com/licenses/mit/",
     },
-    openapi_tags=tag_metadata,
     lifespan=lifespan,
 )
 
@@ -90,5 +69,3 @@ app.include_router(delivery_router.router)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=5002, reload=True)
-
-#python -m uvicorn main:app --reload --port 5000
