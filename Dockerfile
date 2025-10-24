@@ -31,6 +31,6 @@ USER 1000
 COPY app_delivery /home/pyuser/code/app_delivery
 
 # Run the application
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/home/pyuser/code/entrypoint.sh"]
 
 

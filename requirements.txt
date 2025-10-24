@@ -11,4 +11,5 @@ requests~=2.32.4
 httpx
 aio-pika
 pika
+PyJWT
 microservice-chassis-grupo2
