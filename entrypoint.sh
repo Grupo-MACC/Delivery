@@ -20,7 +20,7 @@ uvicorn app_delivery.main:app \
   --ssl-keyfile /certs/delivery/delivery-key.pem \
   --ssl-certfile /certs/delivery/delivery-cert.pem \
   --ssl-ca-certs /certs/ca.pem \
-  --ssl-cert-reqs 2 &
+  --ssl-cert-reqs 1 &
 
 UVICORN_PID=$!
 
