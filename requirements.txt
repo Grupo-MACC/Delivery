@@ -12,4 +12,5 @@ httpx
 aio-pika
 pika
 PyJWT
-microservice-chassis-grupo2
+cryptography
+microservice-chassis-grupo2==0.1.12
