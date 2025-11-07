@@ -2,7 +2,7 @@ import asyncio
 import json
 import httpx
 import logging
-from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, PUBLIC_KEY_PATH
+from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_saga, declare_exchange_command, PUBLIC_KEY_PATH
 from aio_pika import Message
 from services import delivery_service
 from microservice_chassis_grupo2.core.router_utils import AUTH_SERVICE_URL
@@ -79,3 +79,38 @@ async def publish_order_delivered(order_id,status):
     )
     logger.info(f"[ORDER] 📤 Publicado evento order.created → {order_id}")
     await connection.close()
+
+async def publish_delivery_result(order_id,status):
+    connection, channel = await get_channel()
+    
+    exchange = await declare_exchange_saga(channel)
+    await exchange.publish(
+        Message(body=json.dumps({"order_id": order_id, "status":status}).encode()),
+        routing_key="delivery.result"
+    )
+    logger.info(f"[ORDER] 📤 Publicado evento order.created → {order_id}")
+    await connection.close()
+async def consume_check_delivery():
+    _, channel = await get_channel()
+
+    exchange = await declare_exchange_command(channel)
+
+    check_delivery_queue = await channel.declare_queue('check_delivery_queue', durable=True)
+    await check_delivery_queue.bind(exchange, routing_key='check.delivery')
+
+    await check_delivery_queue.consume(handle_check_delivery)
+
+    logger.info("[ORDER] 🟢 Escuchando eventos de pago...")
+    await asyncio.Future()
+
+async def handle_check_delivery(message):
+    async with message.process():
+        data = json.loads(message.body)
+        order_id = data["order_id"]
+        address=data["address"]
+        if address=="01" or address=="20" or address=="48":
+            await publish_delivery_result(order_id=order_id,status="deliverable")
+            logger.info(f"[ORDER] ✅ entregable: {order_id}")
+        else:
+            await publish_delivery_result(order_id=order_id,status="not_deliverable")
+            logger.info(f"[ORDER] ❌ no entregable: {order_id}")
