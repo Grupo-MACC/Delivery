@@ -10,7 +10,7 @@ async def setup_rabbitmq():
     order_ready_queue = await channel.declare_queue('order_ready_queue', durable=True)
     await order_ready_queue.bind(exchange, routing_key='order.ready')
     check_delivery_queue = await channel.declare_queue('check_delivery_queue', durable=True)
-    await check_delivery_queue.bind(exchange, routing_key='check.delivery')
+    await check_delivery_queue.bind(exchange_command, routing_key='check.delivery')
 
     delivery_queue = await channel.declare_queue('delivery_queue', durable=True)
     await delivery_queue.bind(exchange, routing_key="auth.running")
