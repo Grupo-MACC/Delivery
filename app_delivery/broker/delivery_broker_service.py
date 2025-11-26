@@ -5,7 +5,7 @@ import logging
 from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_saga, declare_exchange_command, declare_exchange_logs, PUBLIC_KEY_PATH
 from aio_pika import Message
 from services import delivery_service
-from microservice_chassis_grupo2.core.router_utils import AUTH_SERVICE_URL
+from consul_client import get_service_url
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +79,15 @@ async def handle_auth_events(message):
         data = json.loads(message.body)
         if data["status"] == "running":
             try:
+                # Discover auth service via Consul
+                auth_service_url = await get_service_url("auth", "https://auth:5004")
+                
                 async with httpx.AsyncClient(
                     verify="/certs/ca.pem",
                     cert=("/certs/delivery/delivery-cert.pem", "/certs/delivery/delivery-key.pem"),
                 ) as client:
                     response = await client.get(
-                        f"{AUTH_SERVICE_URL}/auth/public-key"
+                        f"{auth_service_url}/auth/public-key"
                     )
                     response.raise_for_status()
                     public_key = response.text
