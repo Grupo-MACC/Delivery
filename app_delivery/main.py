@@ -55,11 +55,13 @@ async def lifespan(__app: FastAPI):
             logger.error(f"Error configurando RabbitMQ: {e}")'''
 
         try:
+            logger.info("🚀 Lanzando tasks de RabbitMQ consumers...")
             task_order = asyncio.create_task(delivery_broker_service.consume_order_events())
             task_auth = asyncio.create_task(delivery_broker_service.consume_auth_events())
             task_check = asyncio.create_task(delivery_broker_service.consume_check_delivery())
+            logger.info("✅ Tasks de RabbitMQ creados correctamente")
         except Exception as e:
-            logger.error(f"Error lanzando payment broker service: {e}")
+            logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
 
 
         yield

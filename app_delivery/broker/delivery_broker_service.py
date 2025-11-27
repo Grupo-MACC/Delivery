@@ -2,6 +2,7 @@ import asyncio
 import json
 import httpx
 import logging
+import sys
 from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_saga, declare_exchange_command, declare_exchange_logs, PUBLIC_KEY_PATH
 from aio_pika import Message
 from services import delivery_service
@@ -10,21 +11,28 @@ from consul_client import get_service_url
 logger = logging.getLogger(__name__)
 
 async def consume_order_events():
-    _, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
-    
-    order_ready_queue = await channel.declare_queue('order_ready_queue', durable=True)
-    await order_ready_queue.bind(exchange, routing_key='order.ready')
+    try:
+        logger.info("[DELIVERY] 🔄 Iniciando consume_order_events...")
+        print("[DELIVERY] 🔄 Iniciando consume_order_events...", flush=True)
+        _, channel = await get_channel()
+        
+        exchange = await declare_exchange(channel)
+        
+        order_ready_queue = await channel.declare_queue('order_ready_queue', durable=True)
+        await order_ready_queue.bind(exchange, routing_key='order.ready')
 
-    await order_ready_queue.consume(handle_order_events)
+        await order_ready_queue.consume(handle_order_events)
 
-    logger.info("[ORDER] 🟢 Escuchando eventos de pago...")
-    await publish_to_logger(
-        message={"message": "🟢 Delivery escuchando eventos de order.ready"},
-        topic="delivery.info",
-    )
-    await asyncio.Future()
+        logger.info("[ORDER] 🟢 Escuchando eventos de pago...")
+        print("[DELIVERY] 🟢 Escuchando order.ready...", flush=True)
+        await publish_to_logger(
+            message={"message": "🟢 Delivery escuchando eventos de order.ready"},
+            topic="delivery.info",
+        )
+        await asyncio.Future()
+    except Exception as e:
+        logger.error(f"[DELIVERY] ❌ Error en consume_order_events: {e}", exc_info=True)
+        print(f"[DELIVERY] ❌ Error en consume_order_events: {e}", flush=True)
 
 async def handle_order_events(message):
     async with message.process():
@@ -59,33 +67,42 @@ async def handle_order_events(message):
         )
 
 async def consume_auth_events():
-    _, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
-    
-    delivery_queue = await channel.declare_queue('delivery_queue', durable=True)
-    await delivery_queue.bind(exchange, routing_key="auth.running")
-    await delivery_queue.bind(exchange, routing_key="auth.not_running")
-    
-    await delivery_queue.consume(handle_auth_events)
-    logger.info("[DELIVERY] 🟢 Escuchando eventos de auth (running/not_running)...")
-    await publish_to_logger(
-        message={"message": "🟢 Delivery escuchando eventos de auth"},
-        topic="delivery.info",
-    )
+    try:
+        logger.info("[DELIVERY] 🔄 Conectando a RabbitMQ para auth events...")
+        print("[DELIVERY] 🔄 Conectando a RabbitMQ para auth events...", flush=True)
+        _, channel = await get_channel()
+        
+        exchange = await declare_exchange(channel)
+        
+        delivery_queue = await channel.declare_queue('delivery_queue', durable=True)
+        await delivery_queue.bind(exchange, routing_key="auth.running")
+        await delivery_queue.bind(exchange, routing_key="auth.not_running")
+        
+        await delivery_queue.consume(handle_auth_events)
+        logger.info("[DELIVERY] 🟢 Escuchando eventos de auth (running/not_running)...")
+        print("[DELIVERY] 🟢 Escuchando eventos de auth (running/not_running)...", flush=True)
+        await publish_to_logger(
+            message={"message": "🟢 Delivery escuchando eventos de auth"},
+            topic="delivery.info",
+        )
+        await asyncio.Future()  # Run forever
+    except Exception as e:
+        logger.error(f"[DELIVERY] ❌ Error en consume_auth_events: {e}", exc_info=True)
+        print(f"[DELIVERY] ❌ Error en consume_auth_events: {e}", flush=True)
 
 async def handle_auth_events(message):
     async with message.process():
         data = json.loads(message.body)
+        logger.info(f"[DELIVERY] 📥 Recibido evento auth: {data}")
+        print(f"[DELIVERY] 📥 Recibido evento auth: {data}")
+        
         if data["status"] == "running":
             try:
-                # Discover auth service via Consul
-                auth_service_url = await get_service_url("auth", "https://auth:5004")
+                # Use Consul to discover auth service (no fallback)
+                auth_service_url = await get_service_url("auth")
+                logger.info(f"[DELIVERY] 🔍 Auth descubierto via Consul: {auth_service_url}")
                 
-                async with httpx.AsyncClient(
-                    verify="/certs/ca.pem",
-                    cert=("/certs/delivery/delivery-cert.pem", "/certs/delivery/delivery-key.pem"),
-                ) as client:
+                async with httpx.AsyncClient() as client:
                     response = await client.get(
                         f"{auth_service_url}/auth/public-key"
                     )
@@ -96,6 +113,7 @@ async def handle_auth_events(message):
                         f.write(public_key)
                     
                     logger.info(f"✅ Clave pública de Auth guardada en {PUBLIC_KEY_PATH}")
+                    print(f"[DELIVERY] ✅ Clave pública guardada en {PUBLIC_KEY_PATH}")
                     await publish_to_logger(
                         message={
                             "message": "Clave pública de Auth guardada",
@@ -104,6 +122,8 @@ async def handle_auth_events(message):
                         topic="delivery.info",
                     )
             except Exception as exc:
+                logger.error(f"❌ Error obteniendo clave pública: {exc}", exc_info=True)
+                print(f"[DELIVERY] ❌ Error: {exc}")
                 await publish_to_logger(
                     message={
                         "message": "Error obteniendo clave pública de Auth",

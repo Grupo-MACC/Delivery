@@ -26,7 +26,7 @@ class ConsulClient:
         meta: dict = None,
         health_check_url: str = None,
     ) -> bool:
-        """Register service with Consul."""
+        """Register service with Consul using HTTP health check."""
         payload = {
             "ID": service_id,
             "Name": service_name,
@@ -36,12 +36,13 @@ class ConsulClient:
             "Meta": meta or {},
         }
 
-        if health_check_url:
-            payload["Check"] = {
-                "HTTP": health_check_url,
-                "Interval": "10s",
-                "Timeout": "5s",
-            }
+        # HTTP health check (ahora funciona porque no hay TLS interno)
+        payload["Check"] = {
+            "HTTP": health_check_url or f"http://{service_address}:{service_port}/docs",
+            "Interval": "10s",
+            "Timeout": "5s",
+            "DeregisterCriticalServiceAfter": "30s",
+        }
 
         try:
             async with httpx.AsyncClient() as client:
@@ -141,7 +142,8 @@ async def get_service_url(service_name: str, default_url: str = None) -> str:
         try:
             service_info = await consul_client.discover_service(service_name)
             if service_info:
-                url = f"https://{service_info['address']}:{service_info['port']}"
+                # HTTP interno (sin TLS)
+                url = f"http://{service_info['address']}:{service_info['port']}"
                 logger.info(f"✅ Service {service_name} discovered at {url}")
                 return url
         except Exception as e:
