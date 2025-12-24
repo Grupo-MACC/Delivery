@@ -14,19 +14,14 @@ ENV PYTHONPATH=/home/pyuser/code/app_delivery
 ENV SQLALCHEMY_DATABASE_URL=sqlite+aiosqlite:///./delivery.db
 ENV RABBITMQ_USER=guest
 ENV RABBITMQ_PASSWORD=guest
-ENV RABBITMQ_HOST=rabbitmq
+ENV RABBITMQ_HOST=10.0.11.30
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
-ENV ORDER_SERVICE=https://order
-ENV MACHINE_SERVICE=https://machine
-ENV DELIVERY_SERVICE=https://delivery
-ENV PAYMENT_SERVICE=https://payment
-ENV AUTH_SERVICE=https://auth
 # Consul Service Discovery
 ENV CONSUL_HOST=consul
 ENV CONSUL_PORT=8500
 ENV SERVICE_NAME=delivery
 ENV SERVICE_PORT=5002
-ENV SERVICE_ID=delivery-1
+ENV SERVICE_ID=delivery
 
 # Create a non root user
 RUN useradd -u 1000 -d /home/pyuser -m pyuser && \
