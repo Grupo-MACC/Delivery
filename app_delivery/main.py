@@ -27,14 +27,20 @@ async def lifespan(__app: FastAPI):
     try:
         logger.info("Starting up")
 
+        # ✅ PRIMERO: Inicializar la base de datos
+        logger.info("Initializing database connection")
+        await database.init_database()
+        logger.info("Database connection initialized")
+
         try:
             logger.info("Creating database tables")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
-        except Exception:
-            logger.error(
-                "Could not create tables at startup",
-            )
+        except Exception as e:
+            logger.error(f"Could not create tables at startup")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error(f"Traceback:", exc_info=True)
             
         '''try:
             await setup_rabbitmq.setup_rabbitmq()
@@ -49,8 +55,6 @@ async def lifespan(__app: FastAPI):
             logger.info("✅ Tasks de RabbitMQ creados correctamente")
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
-
-
         yield
     finally:
         logger.info("Shutting down database")
