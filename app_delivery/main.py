@@ -7,7 +7,7 @@ import uvicorn
 from fastapi import FastAPI
 from routers import delivery_router
 from microservice_chassis_grupo2.sql import database, models
-from broker import delivery_broker_service, setup_rabbitmq
+from broker import delivery_broker_service
 import asyncio
 from consul_client import create_consul_client
 
@@ -48,11 +48,6 @@ async def lifespan(__app: FastAPI):
             logger.error(
                 "Could not create tables at startup",
             )
-            
-        '''try:
-            await setup_rabbitmq.setup_rabbitmq()
-        except Exception as e:
-            logger.error(f"Error configurando RabbitMQ: {e}")'''
 
         try:
             logger.info("🚀 Lanzando tasks de RabbitMQ consumers...")
