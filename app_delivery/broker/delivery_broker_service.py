@@ -1,221 +1,399 @@
+# -*- coding: utf-8 -*-
+"""Broker RabbitMQ del microservicio Delivery.
+
+Responsabilidades:
+    - Consumir eventos del exchange general:
+        * order.fabricated           -> inicia entrega y publica delivery.finished
+        * auth.running/not_running -> descarga clave pública de Auth
+    - Consumir comandos del exchange_command:
+        * check.delivery        -> responde delivery.result (exchange_saga)
+    - Publicar:
+        * delivery.finished        (exchange general)
+        * delivery.result       (exchange_saga)
+        * logs estructurados    (exchange_logs)
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
-import httpx
 import logging
-import sys
-from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_saga, declare_exchange_command, declare_exchange_logs, PUBLIC_KEY_PATH
+
+import httpx
 from aio_pika import Message
-from services import delivery_service
+
 from consul_client import get_service_url
+from microservice_chassis_grupo2.core.rabbitmq_core import (
+    PUBLIC_KEY_PATH,
+    declare_exchange,
+    declare_exchange_command,
+    declare_exchange_logs,
+    declare_exchange_saga,
+    get_channel,
+)
+from services import delivery_service
 
 logger = logging.getLogger(__name__)
 
-async def consume_order_events():
+# =============================================================================
+# Constantes RabbitMQ (un único punto de control)
+# =============================================================================
+
+# --- Exchange general: eventos ---
+RK_EVT_ORDER_READY = "order.fabricated"
+RK_EVT_DELIVERY_READY = "delivery.finished"
+
+RK_EVT_AUTH_RUNNING = "auth.running"
+RK_EVT_AUTH_NOT_RUNNING = "auth.not_running"
+
+QUEUE_ORDER_READY = "order_ready_queue"
+QUEUE_AUTH_EVENTS = "delivery_queue"  # nombre histórico; lo mantenemos
+
+# --- Exchange command: comandos ---
+RK_CMD_CHECK_DELIVERY = "check.delivery"
+QUEUE_CHECK_DELIVERY = "check_delivery_queue"
+
+# --- Exchange saga: resultados hacia el orquestador ---
+RK_SAGA_DELIVERY_RESULT = "delivery.result"
+
+# --- Topics de logs ---
+TOPIC_INFO = "delivery.info"
+TOPIC_ERROR = "delivery.error"
+TOPIC_DEBUG = "delivery.debug"
+
+# --- Reglas de negocio de "check delivery"
+DELIVERABLE_ADDRESSES = {"01", "20", "48"}
+
+
+# =============================================================================
+# Helpers internos (evitan duplicación)
+# =============================================================================
+#region 0. HELPERS
+def _build_json_message(payload: dict) -> Message:
+    """Construye un Message JSON persistente (recomendado para eventos/comandos).
+
+    Reglas:
+        - content_type='application/json'
+        - delivery_mode=2 (persistente)
+    """
+    return Message(
+        body=json.dumps(payload).encode(),
+        content_type="application/json",
+        delivery_mode=2,
+    )
+
+
+async def _publish_exchange(exchange, routing_key: str, payload: dict) -> None:
+    """Publica payload JSON al exchange indicado con routing_key."""
+    await exchange.publish(_build_json_message(payload), routing_key=routing_key)
+
+
+def _require_fields(data: dict, required: tuple[str, ...], context: str) -> bool:
+    """Valida que existan campos obligatorios en el payload.
+
+    Devuelve:
+        True si ok, False si falta alguno (y loggea el error).
+    """
+    missing = [k for k in required if data.get(k) is None]
+    if not missing:
+        return True
+    logger.error("[DELIVERY] ❌ Payload inválido en %s, faltan %s: %s", context, missing, data)
+    return False
+
+
+# =============================================================================
+# Handlers (consumidores)
+# =============================================================================
+#region 1. HANDLERS
+async def handle_order_events(message) -> None:
+    """Handler para order.fabricated.
+
+    Flujo (idéntico al original, pero robusto):
+        1) Marca status = 'Delivering' y publica delivery.finished (status Delivering)
+        2) Ejecuta delivery_service.deliver()
+        3) Actualiza el status final y vuelve a publicar delivery.finished (status final)
+    """
+    async with message.process():
+        data = json.loads(message.body)
+
+        if not _require_fields(data, ("order_id",), context=RK_EVT_ORDER_READY):
+            await publish_to_logger(
+                {"message": "Payload inválido en order.fabricated", "payload": data},
+                TOPIC_ERROR,
+            )
+            return
+
+        order_id = int(data["order_id"])
+
+        # 1) Estado inicial de entrega
+        status = "Delivering"
+        await delivery_service.update_delivery_status(order_id, status)
+        await publish_order_delivered(order_id=order_id, status=status)
+
+        logger.info("[DELIVERY] 🚚 Comenzando entrega para order_id=%s", order_id)
+        await publish_to_logger(
+            {"message": "Comenzando entrega", "order_id": order_id, "status": status},
+            TOPIC_INFO,
+        )
+
+        # 2) Ejecutar entrega
+        final_status = await delivery_service.deliver(order_id=order_id)
+
+        # 3) Persistir y publicar resultado (mantenemos el mismo evento delivery.finished)
+        await delivery_service.update_delivery_status(order_id, final_status)
+        await publish_order_delivered(order_id=order_id, status=final_status)
+
+        logger.info("[DELIVERY] ✅ Entrega finalizada para order_id=%s con status=%s", order_id, final_status)
+        await publish_to_logger(
+            {"message": "Entrega completada", "order_id": order_id, "status": final_status},
+            TOPIC_INFO,
+        )
+
+
+async def handle_auth_events(message) -> None:
+    """Handler para auth.running / auth.not_running.
+
+    - Solo cuando status == 'running' descarga la public key desde Auth via Consul.
+    - Guarda el contenido en PUBLIC_KEY_PATH.
+    """
+    async with message.process():
+        data = json.loads(message.body)
+
+        status = data.get("status")
+        logger.info("[DELIVERY] 📥 Evento auth recibido: %s", data)
+
+        # En tu versión original solo actuabas si running
+        if status != "running":
+            return
+
+        try:
+            auth_service_url = await get_service_url("auth")
+            logger.info("[DELIVERY] 🔍 Auth descubierto via Consul: %s", auth_service_url)
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{auth_service_url}/auth/public-key")
+                response.raise_for_status()
+                public_key = response.text
+
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            logger.info("[DELIVERY] ✅ Clave pública guardada en %s", PUBLIC_KEY_PATH)
+            await publish_to_logger(
+                {"message": "Clave pública de Auth guardada", "path": PUBLIC_KEY_PATH},
+                TOPIC_INFO,
+            )
+        except Exception as exc:
+            logger.error("[DELIVERY] ❌ Error obteniendo clave pública: %s", exc, exc_info=True)
+            await publish_to_logger(
+                {"message": "Error obteniendo clave pública de Auth", "error": str(exc)},
+                TOPIC_ERROR,
+            )
+
+
+async def handle_check_delivery(message) -> None:
+    """Handler del comando check.delivery.
+
+    Reglas (idénticas al original):
+        - Si address está en {"01","20","48"} -> deliverable
+        - Si no -> not_deliverable
+    Publica el resultado en exchange_saga con routing key delivery.result.
+    """
+    async with message.process():
+        data = json.loads(message.body)
+
+        if not _require_fields(data, ("order_id", "address"), context=RK_CMD_CHECK_DELIVERY):
+            await publish_to_logger(
+                {"message": "Payload inválido en check.delivery", "payload": data},
+                TOPIC_ERROR,
+            )
+            return
+
+        order_id = int(data["order_id"])
+        address = str(data["address"])
+
+        status = "deliverable" if address in DELIVERABLE_ADDRESSES else "not_deliverable"
+        await publish_delivery_result(order_id=order_id, status=status)
+
+        logger.info("[DELIVERY] 📦 check.delivery order_id=%s address=%s -> %s", order_id, address, status)
+        await publish_to_logger(
+            {"message": "Resultado check.delivery", "order_id": order_id, "address": address, "status": status},
+            TOPIC_DEBUG,
+        )
+
+
+# =============================================================================
+# Consumers (setup colas + bindings)
+# =============================================================================
+#region 2. CONSUMERS
+async def consume_order_events() -> None:
+    """Consumer para eventos order.fabricated (exchange general)."""
+    connection = None
     try:
         logger.info("[DELIVERY] 🔄 Iniciando consume_order_events...")
-        print("[DELIVERY] 🔄 Iniciando consume_order_events...", flush=True)
-        _, channel = await get_channel()
-        
+        connection, channel = await get_channel()
         exchange = await declare_exchange(channel)
-        
-        order_ready_queue = await channel.declare_queue('order_ready_queue', durable=True)
-        await order_ready_queue.bind(exchange, routing_key='order.ready')
 
-        await order_ready_queue.consume(handle_order_events)
+        queue = await channel.declare_queue(QUEUE_ORDER_READY, durable=True)
+        await queue.bind(exchange, routing_key=RK_EVT_ORDER_READY)
+        await queue.consume(handle_order_events)
 
-        logger.info("[ORDER] 🟢 Escuchando eventos de pago...")
-        print("[DELIVERY] 🟢 Escuchando order.ready...", flush=True)
+        logger.info("[DELIVERY] 🟢 Escuchando %s en cola %s", RK_EVT_ORDER_READY, QUEUE_ORDER_READY)
         await publish_to_logger(
-            message={"message": "🟢 Delivery escuchando eventos de order.ready"},
-            topic="delivery.info",
+            {"message": "Delivery escuchando eventos", "routing_key": RK_EVT_ORDER_READY, "queue": QUEUE_ORDER_READY},
+            TOPIC_INFO,
         )
+
         await asyncio.Future()
-    except Exception as e:
-        logger.error(f"[DELIVERY] ❌ Error en consume_order_events: {e}", exc_info=True)
-        print(f"[DELIVERY] ❌ Error en consume_order_events: {e}", flush=True)
-
-async def handle_order_events(message):
-    async with message.process():
-        data = json.loads(message.body)
-        order_id = data["order_id"]
-        status="Delivering"
-        db_delivery= await delivery_service.update_delivery_status(order_id, status)
-        await publish_order_delivered(order_id=order_id,status=status)
-        
-        logger.info(f"[DELIVERY] 🚚 Comenzando entrega para orden: {order_id}")
+    except Exception as exc:
+        logger.error("[DELIVERY] ❌ Error en consume_order_events: %s", exc, exc_info=True)
         await publish_to_logger(
-            message={
-                "message": "Comenzando entrega para orden",
-                "order_id": order_id,
-                "status": status,
-            },
-            topic="delivery.info",
+            {"message": "Error en consume_order_events", "error": str(exc)},
+            TOPIC_ERROR,
         )
+        raise
+    finally:
+        # Nota: en la práctica nunca llega aquí porque asyncio.Future() bloquea,
+        # pero lo dejamos correcto por limpieza.
+        if connection:
+            await connection.close()
 
-        status = await delivery_service.deliver(order_id=order_id)
-        await delivery_service.update_delivery_status(order_id, status)
 
-        await publish_order_delivered(order_id=order_id,status=status)
-        logger.info(f"[ORDER] ✅ Pago confirmado para orden: {order_id}")
-        await publish_to_logger(
-            message={
-                "message": "Entrega completada para orden",
-                "order_id": order_id,
-                "status": status,
-            },
-            topic="delivery.info",
-        )
-
-async def consume_auth_events():
+async def consume_auth_events() -> None:
+    """Consumer para eventos de auth.running / auth.not_running (exchange general)."""
+    connection = None
     try:
-        logger.info("[DELIVERY] 🔄 Conectando a RabbitMQ para auth events...")
-        print("[DELIVERY] 🔄 Conectando a RabbitMQ para auth events...", flush=True)
-        _, channel = await get_channel()
-        
+        logger.info("[DELIVERY] 🔄 Iniciando consume_auth_events...")
+        connection, channel = await get_channel()
         exchange = await declare_exchange(channel)
-        
-        delivery_queue = await channel.declare_queue('delivery_queue', durable=True)
-        await delivery_queue.bind(exchange, routing_key="auth.running")
-        await delivery_queue.bind(exchange, routing_key="auth.not_running")
-        
-        await delivery_queue.consume(handle_auth_events)
-        logger.info("[DELIVERY] 🟢 Escuchando eventos de auth (running/not_running)...")
-        print("[DELIVERY] 🟢 Escuchando eventos de auth (running/not_running)...", flush=True)
+
+        queue = await channel.declare_queue(QUEUE_AUTH_EVENTS, durable=True)
+        await queue.bind(exchange, routing_key=RK_EVT_AUTH_RUNNING)
+        await queue.bind(exchange, routing_key=RK_EVT_AUTH_NOT_RUNNING)
+        await queue.consume(handle_auth_events)
+
+        logger.info("[DELIVERY] 🟢 Escuchando auth.* en cola %s", QUEUE_AUTH_EVENTS)
         await publish_to_logger(
-            message={"message": "🟢 Delivery escuchando eventos de auth"},
-            topic="delivery.info",
+            {"message": "Delivery escuchando eventos auth", "queue": QUEUE_AUTH_EVENTS},
+            TOPIC_INFO,
         )
-        await asyncio.Future()  # Run forever
-    except Exception as e:
-        logger.error(f"[DELIVERY] ❌ Error en consume_auth_events: {e}", exc_info=True)
-        print(f"[DELIVERY] ❌ Error en consume_auth_events: {e}", flush=True)
 
-async def handle_auth_events(message):
-    async with message.process():
-        data = json.loads(message.body)
-        logger.info(f"[DELIVERY] 📥 Recibido evento auth: {data}")
-        print(f"[DELIVERY] 📥 Recibido evento auth: {data}")
-        
-        if data["status"] == "running":
-            try:
-                # Use Consul to discover auth service (no fallback)
-                auth_service_url = await get_service_url("auth")
-                logger.info(f"[DELIVERY] 🔍 Auth descubierto via Consul: {auth_service_url}")
-                
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"{auth_service_url}/auth/public-key"
-                    )
-                    response.raise_for_status()
-                    public_key = response.text
-                    
-                    with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
-                        f.write(public_key)
-                    
-                    logger.info(f"✅ Clave pública de Auth guardada en {PUBLIC_KEY_PATH}")
-                    print(f"[DELIVERY] ✅ Clave pública guardada en {PUBLIC_KEY_PATH}")
-                    await publish_to_logger(
-                        message={
-                            "message": "Clave pública de Auth guardada",
-                            "path": PUBLIC_KEY_PATH,
-                        },
-                        topic="delivery.info",
-                    )
-            except Exception as exc:
-                logger.error(f"❌ Error obteniendo clave pública: {exc}", exc_info=True)
-                print(f"[DELIVERY] ❌ Error: {exc}")
-                await publish_to_logger(
-                    message={
-                        "message": "Error obteniendo clave pública de Auth",
-                        "error": str(exc),
-                    },
-                    topic="delivery.error",
-                )
+        await asyncio.Future()
+    except Exception as exc:
+        logger.error("[DELIVERY] ❌ Error en consume_auth_events: %s", exc, exc_info=True)
+        await publish_to_logger(
+            {"message": "Error en consume_auth_events", "error": str(exc)},
+            TOPIC_ERROR,
+        )
+        raise
+    finally:
+        if connection:
+            await connection.close()
 
-async def publish_order_delivered(order_id,status):
-    connection, channel = await get_channel()
-    
-    exchange = await declare_exchange(channel)
-    await exchange.publish(
-        Message(body=json.dumps({"order_id": order_id, "status":status}).encode()),
-        routing_key="delivery.ready"
-    )
-    logger.info(f"[ORDER] 📤 Publicado evento order.created → {order_id}")
-    await publish_to_logger(
-        message={
-            "message": "Publicado evento delivery.ready",
-            "order_id": order_id,
-            "status": status,
-        },
-        topic="delivery.debug",   # o delivery.info 
-    )
-    await connection.close()
 
-async def publish_delivery_result(order_id,status):
-    connection, channel = await get_channel()
-    
-    exchange = await declare_exchange_saga(channel)
-    await exchange.publish(
-        Message(body=json.dumps({"order_id": order_id, "status":status}).encode()),
-        routing_key="delivery.result"
-    )
-    logger.info(f"[ORDER] 📤 Publicado evento order.created → {order_id}")
-    await connection.close()
-    
-async def consume_check_delivery():
-    _, channel = await get_channel()
+async def consume_check_delivery() -> None:
+    """Consumer del comando check.delivery (exchange_command)."""
+    connection = None
+    try:
+        connection, channel = await get_channel()
+        exchange = await declare_exchange_command(channel)
 
-    exchange = await declare_exchange_command(channel)
+        queue = await channel.declare_queue(QUEUE_CHECK_DELIVERY, durable=True)
+        await queue.bind(exchange, routing_key=RK_CMD_CHECK_DELIVERY)
+        await queue.consume(handle_check_delivery)
 
-    check_delivery_queue = await channel.declare_queue('check_delivery_queue', durable=True)
-    await check_delivery_queue.bind(exchange, routing_key='check.delivery')
+        logger.info("[DELIVERY] 🟢 Escuchando %s en cola %s", RK_CMD_CHECK_DELIVERY, QUEUE_CHECK_DELIVERY)
+        await publish_to_logger(
+            {"message": "Delivery escuchando comando", "routing_key": RK_CMD_CHECK_DELIVERY, "queue": QUEUE_CHECK_DELIVERY},
+            TOPIC_INFO,
+        )
 
-    await check_delivery_queue.consume(handle_check_delivery)
+        await asyncio.Future()
+    except Exception as exc:
+        logger.error("[DELIVERY] ❌ Error en consume_check_delivery: %s", exc, exc_info=True)
+        await publish_to_logger(
+            {"message": "Error en consume_check_delivery", "error": str(exc)},
+            TOPIC_ERROR,
+        )
+        raise
+    finally:
+        if connection:
+            await connection.close()
 
-    logger.info("[ORDER] 🟢 Escuchando eventos de pago...")
-    await asyncio.Future()
 
-async def handle_check_delivery(message):
-    async with message.process():
-        data = json.loads(message.body)
-        order_id = data["order_id"]
-        address=data["address"]
-        if address=="01" or address=="20" or address=="48":
-            await publish_delivery_result(order_id=order_id,status="deliverable")
-            logger.info(f"[ORDER] ✅ entregable: {order_id}")
-        else:
-            await publish_delivery_result(order_id=order_id,status="not_deliverable")
-            logger.info(f"[ORDER] ❌ no entregable: {order_id}")
-            
-async def publish_to_logger(message: dict, topic: str):
-    """
-    Envía un log estructurado al sistema de logs.
+# =============================================================================
+# Publishers (eventos)
+# =============================================================================
+#region 3. PUBLISHERS
+async def publish_order_delivered(order_id: int, status: str) -> None:
+    """Publica delivery.finished en el exchange general.
+
+    Nota:
+        - Mantengo el evento 'delivery.finished' exactamente como en tu fichero original.
+        - Solo limpio logs y hago el mensaje persistente/JSON formal.
     """
     connection = None
     try:
         connection, channel = await get_channel()
+        exchange = await declare_exchange(channel)
 
-        # Exchange específico de logs
+        payload = {"order_id": int(order_id), "status": str(status)}
+        await _publish_exchange(exchange, RK_EVT_DELIVERY_READY, payload)
+
+        logger.info("[DELIVERY] 📤 Publicado %s → %s", RK_EVT_DELIVERY_READY, payload)
+        await publish_to_logger(
+            {"message": "Publicado evento delivery.finished", "order_id": int(order_id), "status": str(status)},
+            TOPIC_DEBUG,
+        )
+    finally:
+        if connection:
+            await connection.close()
+
+
+async def publish_delivery_result(order_id: int, status: str) -> None:
+    """Publica delivery.result en exchange_saga (resultado de check.delivery)."""
+    connection = None
+    try:
+        connection, channel = await get_channel()
+        exchange = await declare_exchange_saga(channel)
+
+        payload = {"order_id": int(order_id), "status": str(status)}
+        await _publish_exchange(exchange, RK_SAGA_DELIVERY_RESULT, payload)
+
+        logger.info("[DELIVERY] 📤 Publicado %s → %s", RK_SAGA_DELIVERY_RESULT, payload)
+    finally:
+        if connection:
+            await connection.close()
+
+
+# =============================================================================
+# Logger publisher (igual concepto que en Payment)
+# =============================================================================
+#region LOGGER
+async def publish_to_logger(message: dict, topic: str) -> None:
+    """Envía un log estructurado al exchange de logs.
+
+    Args:
+        message: contenido del log (dict)
+        topic: routing key tipo 'delivery.info' | 'delivery.error' | 'delivery.debug'
+    """
+    connection = None
+    try:
+        connection, channel = await get_channel()
         exchange = await declare_exchange_logs(channel)
 
-        # Estructura común de los logs
+        service, severity = (topic.split(".", 1) + ["info"])[:2]
+
         log_data = {
             "measurement": "logs",
-            "service": topic.split('.')[0],   # 'delivery'
-            "severity": topic.split('.')[1],  # 'info', 'error', 'debug'...
-            **message
+            "service": service,
+            "severity": severity,
+            **message,
         }
 
-        msg = Message(
-            body=json.dumps(log_data).encode(),
-            content_type="application/json",
-            delivery_mode=2,  # persistente
-        )
-
-        await exchange.publish(message=msg, routing_key=topic)
-
-    except Exception as e:
-        print(f"Error publishing to logger: {e}")
+        await _publish_exchange(exchange, topic, log_data)
+    except Exception:
+        logger.exception("[DELIVERY] Error publicando log estructurado")
     finally:
         if connection:
             await connection.close()
