@@ -6,10 +6,10 @@ Responsabilidades:
         * order.fabricated           -> inicia entrega y publica delivery.finished
         * auth.running/not_running -> descarga clave pública de Auth
     - Consumir comandos del exchange_command:
-        * check.delivery        -> responde delivery.result (exchange_saga)
+        * cmd.check.delivery        -> responde evt.delivery.checked (exchange_saga)
     - Publicar:
         * delivery.finished        (exchange general)
-        * delivery.result       (exchange_saga)
+        * evt.delivery.checked       (exchange_saga)
         * logs estructurados    (exchange_logs)
 """
 
@@ -36,7 +36,7 @@ from services import delivery_service
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Constantes RabbitMQ (un único punto de control)
+# Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
 
 # --- Exchange general: eventos ---
@@ -50,11 +50,11 @@ QUEUE_ORDER_READY = "order_ready_queue"
 QUEUE_AUTH_EVENTS = "delivery_queue"  # nombre histórico; lo mantenemos
 
 # --- Exchange command: comandos ---
-RK_CMD_CHECK_DELIVERY = "check.delivery"
+RK_CMD_CHECK_DELIVERY = "cmd.check.delivery"
 QUEUE_CHECK_DELIVERY = "check_delivery_queue"
 
 # --- Exchange saga: resultados hacia el orquestador ---
-RK_SAGA_DELIVERY_RESULT = "delivery.result"
+RK_SAGA_DELIVERY_RESULT = "evt.delivery.checked"
 
 # --- Topics de logs ---
 TOPIC_INFO = "delivery.info"
@@ -192,19 +192,19 @@ async def handle_auth_events(message) -> None:
 
 
 async def handle_check_delivery(message) -> None:
-    """Handler del comando check.delivery.
+    """Handler del comando cmd.check.delivery.
 
     Reglas (idénticas al original):
         - Si address está en {"01","20","48"} -> deliverable
         - Si no -> not_deliverable
-    Publica el resultado en exchange_saga con routing key delivery.result.
+    Publica el resultado en exchange_saga con routing key evt.delivery.checked.
     """
     async with message.process():
         data = json.loads(message.body)
 
         if not _require_fields(data, ("order_id", "address"), context=RK_CMD_CHECK_DELIVERY):
             await publish_to_logger(
-                {"message": "Payload inválido en check.delivery", "payload": data},
+                {"message": "Payload inválido en cmd.check.delivery", "payload": data},
                 TOPIC_ERROR,
             )
             return
@@ -215,9 +215,9 @@ async def handle_check_delivery(message) -> None:
         status = "deliverable" if address in DELIVERABLE_ADDRESSES else "not_deliverable"
         await publish_delivery_result(order_id=order_id, status=status)
 
-        logger.info("[DELIVERY] 📦 check.delivery order_id=%s address=%s -> %s", order_id, address, status)
+        logger.info("[DELIVERY] 📦 cmd.check.delivery order_id=%s address=%s -> %s", order_id, address, status)
         await publish_to_logger(
-            {"message": "Resultado check.delivery", "order_id": order_id, "address": address, "status": status},
+            {"message": "Resultado cmd.check.delivery", "order_id": order_id, "address": address, "status": status},
             TOPIC_DEBUG,
         )
 
@@ -292,7 +292,7 @@ async def consume_auth_events() -> None:
 
 
 async def consume_check_delivery() -> None:
-    """Consumer del comando check.delivery (exchange_command)."""
+    """Consumer del comando cmd.check.delivery (exchange_command)."""
     connection = None
     try:
         connection, channel = await get_channel()
@@ -351,7 +351,7 @@ async def publish_order_delivered(order_id: int, status: str) -> None:
 
 
 async def publish_delivery_result(order_id: int, status: str) -> None:
-    """Publica delivery.result en exchange_saga (resultado de check.delivery)."""
+    """Publica evt.delivery.checked en exchange_saga (resultado de cmd.check.delivery)."""
     connection = None
     try:
         connection, channel = await get_channel()
