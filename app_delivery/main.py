@@ -58,7 +58,8 @@ async def lifespan(__app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
 
-
+        await delivery_broker_service.ensure_auth_public_key()
+        
         yield
     finally:
         logger.info("Shutting down database")
