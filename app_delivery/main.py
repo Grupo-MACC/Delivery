@@ -46,8 +46,7 @@ async def lifespan(__app: FastAPI):
             logger.info("✅ Tasks de RabbitMQ creados correctamente")
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
-
-
+        
         yield
     finally:
         logger.info("Shutting down database")
