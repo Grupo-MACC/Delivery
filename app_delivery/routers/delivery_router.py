@@ -11,18 +11,10 @@ router = APIRouter(
     prefix="/delivery"
 )
 
-@router.get(
-    "/health",
-    summary="Health check endpoint",
-    response_model=schemas.Message,
-)
-async def health_check():
-    """Endpoint to check if everything started correctly."""
-    logger.debug("GET '/health' endpoint called.")
-    if check_public_key():
-        return {"detail": "OK"}
-    else:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service not available")
+@router.get("/health", include_in_schema=False)
+async def health() -> dict:
+    """ Healthcheck LIVENESS (para Consul / balanceadores). """
+    return {"detail": "OK"}
 
 @router.get(
     "/status/{order_id}",

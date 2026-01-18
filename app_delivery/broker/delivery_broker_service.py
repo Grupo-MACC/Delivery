@@ -23,7 +23,7 @@ import os
 import httpx
 from aio_pika import Message
 
-from consul_client import get_service_url
+from consul_client import get_consul_client
 from microservice_chassis_grupo2.core.rabbitmq_core import (
     PUBLIC_KEY_PATH,
     declare_exchange,
@@ -101,6 +101,78 @@ def _require_fields(data: dict, required: tuple[str, ...], context: str) -> bool
     logger.error("[DELIVERY] ❌ Payload inválido en %s, faltan %s: %s", context, missing, data)
     return False
 
+def _internal_ca_file() -> str:
+    """
+    Devuelve la ruta del CA bundle para llamadas internas HTTPS.
+
+    Por qué:
+        - Los microservicios están usando certificados firmados por una CA privada.
+        - httpx por defecto valida contra el bundle del sistema/certifi.
+        - Si no le pasas tu CA, obtendrás CERTIFICATE_VERIFY_FAILED.
+
+    Prioridad:
+        1) INTERNAL_CA_FILE
+        2) CONSUL_CA_FILE
+        3) /certs/ca.pem (convención del proyecto)
+    """
+    return os.getenv("INTERNAL_CA_FILE") or os.getenv("CONSUL_CA_FILE") or "/certs/ca.pem"
+
+async def _download_auth_public_key(auth_base_url: str) -> str:
+    """
+    Descarga la clave pública de Auth usando HTTPS con verificación por CA privada.
+
+    Args:
+        auth_base_url: Base URL (p.ej. "https://auth:5004")
+
+    Returns:
+        El texto PEM de la clave pública.
+
+    Nota:
+        - Separar esta función facilita reintentos.
+    """
+    async with httpx.AsyncClient(verify=_internal_ca_file(), timeout=5.0) as client:
+        resp = await client.get(f"{auth_base_url}/auth/public-key")
+        resp.raise_for_status()
+        return resp.text
+
+
+async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.25) -> None:
+    """
+    Asegura que existe la clave pública de Auth en PUBLIC_KEY_PATH.
+
+    Estrategia simple:
+        - Intenta resolver Auth por Consul (passing=true).
+        - Si aún no hay instancias passing (race al arrancar), reintenta con backoff.
+        - Cuando lo resuelve, descarga la clave con TLS verify (CA privada) y la guarda.
+
+    Por qué:
+        - auth.running se publica antes de que Auth esté realmente "ready" (FastAPI aún no sirve HTTP).
+        - Por tanto, al recibir el evento, Consul puede devolver 0 passing temporalmente.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_base_url = await get_consul_client().get_service_base_url("auth")
+            public_key = await _download_auth_public_key(auth_base_url)
+
+            # Escritura directa (simple). Si quieres más robustez: escribir a .tmp y renombrar.
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            logger.info("[DELIVERY] ✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
+            return
+
+        except Exception as exc:
+            # OJO: esto NO es un error grave. Es normal durante el arranque.
+            logger.warning(
+                "[DELIVERY] ⏳ Auth aún no está 'passing' o no responde. Reintento %s/%s. Motivo: %s",
+                attempt, max_attempts, exc
+            )
+
+            # Backoff suave (capado)
+            delay = min(2.0, base_delay * (2 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
 
 # =============================================================================
 # Handlers (consumidores)
@@ -151,28 +223,31 @@ async def handle_order_events(message) -> None:
         )
 
 
-async def handle_auth_events(message: dict) -> None:
-    """Gestiona eventos de auth.running / auth.not_running.
-
-    Si auth está running:
-        - Descubre auth via Consul
-        - Descarga la public key
-        - La guarda en PUBLIC_KEY_PATH
+async def handle_auth_events(message) -> None:
     """
-    try:
-        await ensure_auth_public_key()
+    Gestiona eventos de auth.running / auth.not_running.
 
-        logger.info("✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
-        await publish_to_logger(
-            message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
-            topic=TOPIC_INFO,
-        )
-    except Exception as exc:
-        logger.error("[PAYMENT] ❌ Error obteniendo clave pública: %s", exc)
-        await publish_to_logger(
-            message={"message": "Error clave pública", "error": str(exc)},
-            topic=TOPIC_ERROR,
-        )
+    Nota importante:
+        - Aunque recibamos 'running', Auth puede no estar listo aún (FastAPI aún no sirve HTTP).
+        - Por eso hacemos reintentos contra Consul (passing=true) y luego descargamos la clave.
+    """
+    async with message.process():
+        data = json.loads(message.body)
+        if data.get("status") != "running":
+            return
+
+        try:
+            await _ensure_auth_public_key()
+            await publish_to_logger(
+                message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
+            )
+        except Exception as exc:
+            logger.error("[DELIVERY] ❌ Error obteniendo clave pública: %s", exc)
+            await publish_to_logger(
+                message={"message": "Error clave pública", "error": str(exc)},
+                topic=TOPIC_ERROR,
+            )
 
 
 async def handle_check_delivery(message) -> None:
