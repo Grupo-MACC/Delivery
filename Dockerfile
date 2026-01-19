@@ -11,7 +11,7 @@ RUN pip install -r /requirements.txt
 # We will be working on this folder
 WORKDIR /home/pyuser/code
 ENV PYTHONPATH=/home/pyuser/code/app_delivery
-ENV RABBITMQ_USER=guest
+ENV RABBITMQ_USER=user
 ENV RABBITMQ_PASSWORD=guest
 ENV RABBITMQ_HOST=10.1.11.30
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
@@ -24,6 +24,7 @@ ENV SERVICE_ID=delivery
 ENV CONSUL_SCHEME=https
 ENV CONSUL_CA_FILE=/certs/ca.pem
 ENV CONSUL_REGISTRATION_EVENT_URL=http://54.225.33.0:8081/restart
+ENV DB_NAME=delivery_db
 
 ENV SERVICE_CERT_FILE=/certs/delivery/delivery-cert.pem
 ENV SERVICE_KEY_FILE=/certs/delivery/delivery-key.pem

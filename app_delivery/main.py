@@ -6,8 +6,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from routers import delivery_router
-from sql import models
-from microservice_chassis_grupo2.sql import database
+from microservice_chassis_grupo2.sql import database, models
 from broker import delivery_broker_service
 import asyncio
 # Configure logging ################################################################################
@@ -21,16 +20,22 @@ async def lifespan(__app: FastAPI):
     """Lifespan context manager."""
 
     try:
-        logger.info("Starting up")
-
+        try:
+            logger.info("Initializing database connection")
+            await database.init_database()
+            logger.info("Database connection initialized")
+        except Exception as e:
+            logger.error(f"Could not initialize database connection: {e}", exc_info=True)
+            with open("/home/pyuser/code/error.txt", "w") as f:
+                f.write(f"{e}\n")
+            raise e
+        
         try:
             logger.info("Creating database tables")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
         except Exception:
-            logger.error(
-                "Could not create tables at startup",
-            )
+            logger.error("Could not create tables at startup")
 
         try:
             logger.info("🚀 Lanzando tasks de RabbitMQ consumers...")
