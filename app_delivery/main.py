@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from routers import delivery_router
-from microservice_chassis_grupo2.sql import database, models
+from sql import models
+from microservice_chassis_grupo2.sql import database
 from broker import delivery_broker_service
 import asyncio
 # Configure logging ################################################################################
@@ -78,7 +79,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("SERVICE_PORT", "5002")),
+        port=int(os.getenv("SERVICE_PORT", "5000")),
         reload=True,
         ssl_certfile=cert_file,
         ssl_keyfile=key_file,

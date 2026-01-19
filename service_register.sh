@@ -3,9 +3,9 @@
 # Nombre y ID del servicio
 SERVICE_NAME="delivery"
 SERVICE_ID="delivery"
-SERVICE_PORT=5002
-CONSUL_HOST="10.0.11.40"  # IP del Consul agent
-CONSULT_PORT=8500
+SERVICE_PORT=5000
+CONSUL_HOST="10.1.11.40"
+CONSUL_PORT=8501
 TAGS='["delivery","microservice"]'
 META='{"version":"1.0"}'
 
@@ -13,7 +13,7 @@ META='{"version":"1.0"}'
 SERVICE_ADDRESS=$(hostname -I | awk '{print $1}')
 
 # Hacer el registro en Consul
-curl -s -X PUT "http://${CONSUL_HOST}:${CONSULT_PORT}/v1/agent/service/register" \
+curl -s -X PUT "http://${CONSUL_HOST}:${CONSUL_PORT}/v1/agent/service/register" \
      -H "Content-Type: application/json" \
      -d "{
            \"ID\": \"${SERVICE_ID}\",

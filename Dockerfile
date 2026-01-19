@@ -11,16 +11,15 @@ RUN pip install -r /requirements.txt
 # We will be working on this folder
 WORKDIR /home/pyuser/code
 ENV PYTHONPATH=/home/pyuser/code/app_delivery
-ENV SQLALCHEMY_DATABASE_URL=sqlite+aiosqlite:///./delivery.db
 ENV RABBITMQ_USER=guest
 ENV RABBITMQ_PASSWORD=guest
-ENV RABBITMQ_HOST=10.0.11.30
+ENV RABBITMQ_HOST=10.1.11.30
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
 # Consul Service Discovery
-ENV CONSUL_HOST=10.0.11.40
-ENV CONSUL_PORT=8500
+ENV CONSUL_HOST=10.1.11.40
+ENV CONSUL_PORT=8501
 ENV SERVICE_NAME=delivery
-ENV SERVICE_PORT=5002
+ENV SERVICE_PORT=5000
 ENV SERVICE_ID=delivery
 ENV CONSUL_SCHEME=https
 ENV CONSUL_CA_FILE=/certs/ca.pem
