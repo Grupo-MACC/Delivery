@@ -9,8 +9,6 @@ from routers import delivery_router
 from microservice_chassis_grupo2.sql import database, models
 from broker import delivery_broker_service
 import asyncio
-from consul_client import get_consul_client
-
 # Configure logging ################################################################################
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
 logger = logging.getLogger(__name__)
@@ -20,14 +18,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(__app: FastAPI):
     """Lifespan context manager."""
-    consul = get_consul_client()
 
     try:
         logger.info("Starting up")
-        
-        # Registro "auto" (usa SERVICE_* y CONSUL_* desde entorno)
-        ok = await consul.register_self()
-        logger.info("✅ Consul register_self: %s", ok)
 
         try:
             logger.info("Creating database tables")
@@ -55,18 +48,6 @@ async def lifespan(__app: FastAPI):
         task_order.cancel()
         task_auth.cancel()
         task_check.cancel()
-        
-        # Deregistro (auto) + cierre del cliente HTTP
-        try:
-            ok = await consul.deregister_self()
-            logger.info("✅ Consul deregister_self: %s", ok)
-        except Exception:
-            logger.exception("Error desregistrando en Consul")
-
-        try:
-            await consul.aclose()
-        except Exception:
-            logger.exception("Error cerrando cliente Consul")
 
 
 # OpenAPI Documentation ############################################################################
