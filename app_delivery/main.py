@@ -42,6 +42,8 @@ async def lifespan(__app: FastAPI):
             task_order = asyncio.create_task(delivery_broker_service.consume_order_events())
             task_auth = asyncio.create_task(delivery_broker_service.consume_auth_events())
             task_check = asyncio.create_task(delivery_broker_service.consume_check_delivery())
+            
+            task_fetch_public_key = asyncio.create_task(delivery_broker_service.fetch_auth_public_key_on_startup())
             logger.info("✅ Tasks de RabbitMQ creados correctamente")
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)

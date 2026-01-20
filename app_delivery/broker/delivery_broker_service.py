@@ -23,7 +23,7 @@ import os
 import httpx
 from aio_pika import Message
 
-from consul_client import get_consul_client
+from microservice_chassis_grupo2.core.consul import get_service_url
 from microservice_chassis_grupo2.core.rabbitmq_core import (
     PUBLIC_KEY_PATH,
     declare_exchange,
@@ -47,8 +47,11 @@ RK_EVT_DELIVERY_READY = "delivery.finished"
 RK_EVT_AUTH_RUNNING = "auth.running"
 RK_EVT_AUTH_NOT_RUNNING = "auth.not_running"
 
+import uuid
+_AUTH_SUFFIX = uuid.uuid4().hex[:8]
+
 QUEUE_ORDER_READY = "order_ready_queue"
-QUEUE_AUTH_EVENTS = "delivery_queue"  # nombre histórico; lo mantenemos
+QUEUE_AUTH_EVENTS = f"delivery_queue_{_AUTH_SUFFIX}"  # nombre histórico; lo mantenemos
 
 # --- Exchange command: comandos ---
 RK_CMD_CHECK_DELIVERY = "cmd.check.delivery"
@@ -130,7 +133,7 @@ async def _download_auth_public_key(auth_base_url: str) -> str:
     Nota:
         - Separar esta función facilita reintentos.
     """
-    async with httpx.AsyncClient(verify=_internal_ca_file(), timeout=5.0) as client:
+    async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
         resp = await client.get(f"{auth_base_url}/auth/public-key")
         resp.raise_for_status()
         return resp.text
@@ -151,7 +154,7 @@ async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.
     """
     for attempt in range(1, max_attempts + 1):
         try:
-            auth_base_url = await get_consul_client().get_service_base_url("auth")
+            auth_base_url = await get_service_url("auth")
             public_key = await _download_auth_public_key(auth_base_url)
 
             # Escritura directa (simple). Si quieres más robustez: escribir a .tmp y renombrar.
@@ -173,6 +176,53 @@ async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.
             await asyncio.sleep(delay)
 
     raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
+
+async def fetch_auth_public_key_on_startup(max_attempts: int = 60, base_delay: float = 2.0) -> None:
+    """
+    Intenta obtener la clave pública de Auth al iniciar Delivery.
+    
+    Por qué es necesario:
+        - Si esta réplica de Delivery arranca DESPUÉS de que Auth publicó 'auth.running',
+          nunca recibirá ese mensaje (ya fue publicado antes de que existiera la cola).
+        - Este método garantiza que SIEMPRE intentamos obtener la clave al arrancar.
+    
+    Estrategia:
+        - Reintentos con backoff exponencial (hasta ~2 minutos).
+        - Si Auth no está disponible, seguimos reintentando en background.
+        - No bloquea el arranque de Delivery (se ejecuta como task).
+    
+    Nota:
+        - El listener de auth.running sigue activo para detectar reinicios de Auth
+          y obtener nuevas claves si Auth regenera sus RSA keys.
+    """
+    logger.info("[DELIVERY] 🔑 Iniciando obtención de clave pública de Auth al arranque...")
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_base_url = await get_service_url("auth")
+            public_key = await _download_auth_public_key(auth_base_url)
+            
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+            
+            await publish_to_logger(
+                message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
+            )
+            
+            logger.info("[DELIVERY] ✅ Clave pública de Auth obtenida al arranque y guardada en %s", PUBLIC_KEY_PATH)
+            return
+            
+        except Exception as exc:
+            logger.warning(
+                "[DELIVERY] ⏳ (Startup) Auth no disponible aún. Reintento %s/%s. Motivo: %s",
+                attempt, max_attempts, exc
+            )
+            # Backoff exponencial con cap de 30 segundos
+            delay = min(30.0, base_delay * (1.5 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+    
+    logger.error("[DELIVERY] ❌ No se pudo obtener la clave pública de Auth tras %s intentos al arranque", max_attempts)
 
 # =============================================================================
 # Handlers (consumidores)
